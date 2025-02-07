@@ -1,4 +1,4 @@
-/// still eing worked on. V-0.9.3
+/// still being worked on (1/6th complete). V-0.9.3
 use std::fmt;
 use std::collections::HashMap;
 use std::fs::File;
