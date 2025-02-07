@@ -73,5 +73,18 @@ Generate Verilog code for FPGA implementation:
 let verilog_code = VerilogGenerator::generate();
 println!("Generated Verilog code:\n{}", verilog_code);
 ```
-### Future additions
+## Future additions
+
+Addition | Description
+---|---
+N/A | N/A
+
+--- 
+
+<div align=center>    
+
 ## License
+
+This project is licensed under [Creative Commons Attribution-NonCommercial-NoDerivs 4.0 International] – see [CPScript/Legal](https://github.com/CPScript/Legal) for details.
+
+</div>
