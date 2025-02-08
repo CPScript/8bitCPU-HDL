@@ -1,3 +1,7 @@
+> This `Readme.md` will be updated to match the project structure soon.
+
+---
+
 # 8-bit CPU Simulator and Assembler
 
 >This project implements a simple 8-bit CPU simulator with support for a 16-bit ALU and various hardware functionalities. The simulator includes a full assembler, a machine code loader, and debugging tools. The CPU supports both software execution and FPGA compatibility via Verilog generation.
