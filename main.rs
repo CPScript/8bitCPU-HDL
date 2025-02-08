@@ -1,20 +1,99 @@
-/// Still being worked on (2.6/6th complete). V-0.11.6
 /// This file is currently missing logic. I will implement it soon.
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
-enum CPUError {
-    MemoryAccessViolation(usize),
-    InvalidInstruction(u8),
-    StackOverflow,
+pub enum CPUError {
+    MemoryAccessViolation { address: usize, access_type: AccessType },
+    InvalidInstruction { opcode: u8, context: String },
+    StackError(StackErrorType),
     DivisionByZero,
-    InvalidInterrupt(u8),
-    PipelineHazard(String),
-    CacheError(String),
+    InvalidInterrupt { vector: u8, reason: String },
+    PipelineHazard(HazardType),
+    CacheError(CacheErrorType),
+    ProtectionFault { operation: String, privilege_level: u8 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AccessType {
+    Read,
+    Write,
+    Execute,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StackErrorType {
+    Overflow,
+    Underflow,
+    InvalidAccess,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HazardType {
+    DataHazard,
+    StructuralHazard,
+    ControlHazard,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CacheErrorType {
+    InvalidAccess,
+    Coherency,
+    Replacement,
+}
+
+#[derive(Debug)]
+struct MMU {
+    page_table: HashMap<usize, PageTableEntry>,
+    tlb: TLB,
+}
+
+#[derive(Debug, Clone)]
+struct PageTableEntry {
+    physical_address: usize,
+    flags: PageFlags,
+    last_access: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct PageFlags {
+    readable: bool,
+    writable: bool,
+    executable: bool,
+    cached: bool,
+    dirty: bool,
+}
+
+#[derive(Debug)]
+struct Pipeline {
+    stages: VecDeque<PipelineStage>,
+    hazard_unit: HazardUnit,
+    branch_predictor: BranchPredictor,
+}
+
+#[derive(Debug)]
+struct HazardUnit {
+    forwarding_enabled: bool,
+    stall_pipeline: bool,
+    hazard_type: Option<HazardType>,
+}
+
+#[derive(Debug)]
+struct BranchPredictor {
+    branch_history_table: HashMap<usize, BranchHistory>,
+    global_history_register: u16,
+    prediction_accuracy: f64,
+}
+
+#[derive(Debug)]
+struct BranchHistory {
+    taken_count: u32,
+    not_taken_count: u32,
+    last_outcome: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +138,8 @@ struct Cache {
     data_cache: HashMap<usize, CacheLine>,
     instruction_cache: HashMap<usize, CacheLine>,
     cache_stats: CacheStats,
+    lines: Vec<CacheLine>,
+    config: CacheConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +155,73 @@ struct CacheStats {
     hits: usize,
     misses: usize,
     evictions: usize,
+}
+
+struct CacheHierarchy {
+    l1_instruction: Cache,
+    l1_data: Cache,
+    l2_unified: Cache,
+    statistics: CacheStatistics,
+}
+
+#[derive(Debug, Clone)]
+struct CacheConfig {
+    size: usize,
+    line_size: usize,
+    associativity: usize,
+    write_policy: WritePolicy,
+    replacement_policy: ReplacementPolicy,
+}
+
+#[derive(Debug)]
+struct PerformanceMonitor {
+    cycle_count: AtomicU64,
+    instruction_count: AtomicU64,
+    cache_stats: CacheStatistics,
+    branch_stats: BranchStatistics,
+    power_usage: PowerStatistics,
+}
+
+#[derive(Debug)]
+struct TLB {
+    entries: HashMap<usize, usize>,
+    capacity: usize,
+}
+
+#[derive(Debug)]
+struct CacheStatistics {
+    hits: usize,
+    misses: usize,
+    evictions: usize,
+    access_time: Duration,
+}
+
+#[derive(Debug)]
+struct BranchStatistics {
+    predictions: usize,
+    correct_predictions: usize,
+    mispredictions: usize,
+}
+
+#[derive(Debug)]
+struct PowerStatistics {
+    total_power: f64,
+    instruction_power: f64,
+    memory_power: f64,
+    cache_power: f64,
+}
+
+#[derive(Debug, Clone)]
+enum WritePolicy {
+    WriteThrough,
+    WriteBack,
+}
+
+#[derive(Debug, Clone)]
+enum ReplacementPolicy {
+    LRU,
+    FIFO,
+    Random,
 }
 
 #[derive(Debug, Clone)]
@@ -134,35 +282,68 @@ struct DMAController {
     size: usize,
 }
 
+impl TLB {
+    fn new(capacity: usize) -> Self {
+        TLB {
+            entries: HashMap::new(),
+            capacity,
+        }
+    }
+
+    fn lookup(&self, virtual_addr: usize) -> Option<usize> {
+        self.entries.get(&virtual_addr).copied()
+    }
+
+    fn insert(&mut self, virtual_addr: usize, physical_addr: usize) {
+        if self.entries.len() >= self.capacity {
+            // Simple FIFO replacement
+            if let Some(key) = self.entries.keys().next().copied() {
+                self.entries.remove(&key);
+            }
+        }
+        self.entries.insert(virtual_addr, physical_addr);
+    }
+}
+
+impl MMU {
+    fn new(memory_size: usize) -> Self {
+        MMU {
+            page_table: HashMap::new(),
+            tlb: TLB::new(64), // 64-entry TLB
+        }
+    }
+
+    fn translate_address(&self, virtual_addr: usize) -> Result<usize, CPUError> {
+        let page_number = virtual_addr / 4096; // 4KB pages
+        let offset = virtual_addr % 4096;
+
+        if let Some(entry) = self.page_table.get(&page_number) {
+            Ok(entry.physical_address + offset)
+        } else {
+            Err(CPUError::MemoryAccessViolation {
+                address: virtual_addr,
+                access_type: AccessType::Read,
+            })
+        }
+    }
+}
+
 impl CPU {
-    fn new() -> Self {
-        let cache_system = CacheSystem {
-            l1_cache: Cache::new(1024, 64, 4),    // 1KB L1 cache
-            l2_cache: Cache::new(4096, 128, 8),   // 4KB L2 cache
-            tlb: TLB::new(64),                    // 64-entry TLB
-            stats: CacheStats::default(),
-        };
-
-        let debug_info = DebugInfo {
-            breakpoints: HashMap::new(),
-            watch_points: HashMap::new(),
-            call_stack: Vec::new(),
-            instruction_history: VecDeque::with_capacity(100),
-        };
-
-        let branch_predictor = BranchPredictor {
-            branch_history_table: HashMap::new(),
-            global_history: 0,
-        };
+    pub fn new(config: CPUConfig) -> Self {
         let mut registers = HashMap::new();
         for i in 0..8 {
             registers.insert(format!("R{}", i), 0);
         }
 
+        let mmu = MMU::new(config.memory_size);
+        let cache_hierarchy = CacheHierarchy::new(&config.cache_config);
+        let pipeline = Pipeline::new(&config.pipeline_config);
+        let performance_monitor = PerformanceMonitor::new();
+
         CPU {
             registers,
-            memory: vec![0; 65536], // 64KB memory
-            rom: vec![0; 8192],     // 8KB ROM
+            memory: vec![0; config.memory_size],
+            rom: vec![0; config.rom_size],
             stack: Vec::with_capacity(256),
             pc: 0,
             flags: StatusFlags {
@@ -172,39 +353,59 @@ impl CPU {
                 negative: false,
                 interrupt: true,
             },
-            pipeline: VecDeque::with_capacity(5),
-            cache: Cache {
-                data_cache: HashMap::new(),
-                instruction_cache: HashMap::new(),
-                cache_stats: CacheStats {
-                    hits: 0,
-                    misses: 0,
-                    evictions: 0,
-                },
-            },
-
-            io_memory: vec![0; 256],  // 256 bytes of I/O memory
+            pipeline: pipeline.stages,
+            cache_hierarchy,
+            mmu,
+            performance_monitor,
+            io_memory: vec![0; 256],
             dma_controller: DMAController {
                 busy: false,
                 source: 0,
                 destination: 0,
-                size: 0, 
+                size: 0,
             },
-
             interrupt_vector: vec![0; 256],
             protected_mode: false,
             cycle_count: 0,
             power_consumption: 0.0,
             last_instruction_time: Instant::now(),
-
-            
         }
+    }
+
+    fn execute(&mut self) -> Result<(), CPUError> {
+        while let Some(instruction) = self.pipeline.next_instruction() {
+            self.performance_monitor.start_instruction();
+            
+            // Check hazards before execution
+            self.pipeline.hazard_unit.check_hazards()?;
+            
+            let result = self.execute_instruction(instruction);
+            
+            match result {
+                Ok(_) => {
+                    self.performance_monitor.complete_instruction();
+                    self.pipeline.branch_predictor.update(self.pc);
+                }
+                Err(e) => {
+                    self.handle_error(e)?;
+                }
+            }
+            
+            self.pipeline.advance();
+            self.check_interrupts()?;
+        }
+        Ok(())
     }
 
     fn execute_instruction(&mut self, instruction: Instruction) -> Result<(), CPUError> {
         self.cycle_count += 1;
         let start_time = Instant::now();
 
+        let result = match instruction {
+            Instruction::Add(dest, src1, src2) => self.execute_add(&dest, &src1, &src2),
+            Instruction::Mul(dest, src1, src2) => self.execute_mul(&dest, &src1, &src2),
+            Instruction::Div(dest, src1, src2) => self.execute_div(&dest, &src1, &src2),
+        }
         let result = match instruction {
             Instruction::Add(dest, src1, src2) => {
                 let a = self.get_register(&src1)?;
@@ -385,12 +586,44 @@ impl CPU {
             _ => Ok(()),
         };
 
+        match instruction {
+            Instruction::Arithmetic(op) => self.execute_arithmetic(op),
+            Instruction::Memory(op) => self.execute_memory(op),
+            Instruction::Branch(op) => self.execute_branch(op),
+            Instruction::System(op) => self.execute_system(op),
+        }
+
         // Update performance metrics
         let duration = start_time.elapsed();
         self.update_power_consumption(duration);
         self.last_instruction_time = Instant::now();
 
         result
+    }
+
+    fn execute_add(&mut self, dest: &str, src1: &str, src2: &str) -> Result<(), CPUError> {
+        let a = self.get_register(src1)?;
+        let b = self.get_register(src2)?;
+        let (result, carry) = a.overflowing_add(b);
+        self.flags.carry = carry;
+        self.flags.zero = result == 0;
+        self.set_register(dest, result)
+    }
+
+    fn access_memory(&mut self, address: usize, access_type: AccessType) -> Result<u8, CPUError> {
+        // Check protection rings
+        self.check_memory_protection(address, access_type)?;
+        
+        // Try TLB first
+        if let Some(physical_address) = self.mmu.tlb.lookup(address) {
+            return self.access_physical_memory(physical_address, access_type);
+        }
+        
+        // TLB miss, check page table
+        let physical_address = self.mmu.translate_address(address)?;
+        self.mmu.tlb.insert(address, physical_address);
+        
+        self.access_physical_memory(physical_address, access_type)
     }
 
     fn read_memory(&mut self, addr: usize) -> Result<u8, CPUError> {
