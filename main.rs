@@ -1,4 +1,5 @@
-/// still being worked on (2.8/6th complete). V-0.11.6
+/// Still being worked on (2.6/6th complete). V-0.11.6
+/// There is currently missing logic. I will implement it soon.
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::File;
@@ -135,6 +136,24 @@ struct DMAController {
 
 impl CPU {
     fn new() -> Self {
+        let cache_system = CacheSystem {
+            l1_cache: Cache::new(1024, 64, 4),    // 1KB L1 cache
+            l2_cache: Cache::new(4096, 128, 8),   // 4KB L2 cache
+            tlb: TLB::new(64),                    // 64-entry TLB
+            stats: CacheStats::default(),
+        };
+
+        let debug_info = DebugInfo {
+            breakpoints: HashMap::new(),
+            watch_points: HashMap::new(),
+            call_stack: Vec::new(),
+            instruction_history: VecDeque::with_capacity(100),
+        };
+
+        let branch_predictor = BranchPredictor {
+            branch_history_table: HashMap::new(),
+            global_history: 0,
+        };
         let mut registers = HashMap::new();
         for i in 0..8 {
             registers.insert(format!("R{}", i), 0);
