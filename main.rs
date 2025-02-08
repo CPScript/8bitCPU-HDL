@@ -1,334 +1,633 @@
-/// still being worked on (1/6th complete). V-0.9.3
+/// still being worked on (2.8/6th complete). V-0.11.6
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
 
-/// Enum representing different types of instructions for the 8-bit CPU.
-#[derive(Debug, Clone)]
-enum Instruction {
-    And(String, String, String),  // AND operation
-    Or(String, String, String),   // OR operation
-    Xor(String, String, String),  // XOR operation
-    Not(String, String),          // NOT operation
-    Shl(String, String),          // Shift left
-    Shr(String, String),          // Shift right
-    Rol(String, String),          // Rotate left
-    Ror(String, String),          // Rotate right
-    Jmp(usize),                   // Unconditional jump
-    Jz(usize),                     // Jump if zero flag is set
-    Jnz(usize),                    // Jump if zero flag is not set
-    Jc(usize),                     // Jump if carry flag is set
-    Cmp(String, String),           // Compare two registers
-    Set(String, String),           // Set register based on condition
-    Push(String),                  // Push register to stack
-    Pop(String),                   // Pop register from stack
-    Call(usize),                   // Call subroutine
-    Ret,                            // Return from subroutine
-    Mul(String, String, String),    // Multiply two registers (16-bit support)
-    Div(String, String, String),    // Divide two registers (16-bit support)
-    Int(u8),                        // Interrupt call
-    Iret,                           // Interrupt return
-    LoadMem(String, usize),         // Load from memory
-    StoreMem(String, usize),        // Store to memory
-    LoadIO(String, usize),          // Load from I/O memory
-    StoreIO(String, usize),         // Store to I/O memory
-    DmaTransfer(usize, usize, usize), // Direct Memory Access transfer
+#[derive(Debug, Clone, PartialEq)]
+enum CPUError {
+    MemoryAccessViolation(usize),
+    InvalidInstruction(u8),
+    StackOverflow,
+    DivisionByZero,
+    InvalidInterrupt(u8),
+    PipelineHazard(String),
+    CacheError(String),
 }
 
-/// Structure representing an 8-bit CPU with 16-bit ALU support.
+#[derive(Debug, Clone)]
+enum PipelineStage {
+    Fetch(u8),
+    Decode(Instruction),
+    Execute(ExecutionResult),
+    MemoryAccess(MemoryOperation),
+    WriteBack(WriteBackData),
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionResult {
+    result: u16,
+    flags: StatusFlags,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryOperation {
+    address: usize,
+    data: Option<u8>,
+    is_read: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WriteBackData {
+    register: String,
+    value: u8,
+}
+
+#[derive(Debug, Clone)]
+struct StatusFlags {
+    zero: bool,
+    carry: bool,
+    overflow: bool,
+    negative: bool,
+    interrupt: bool,
+}
+
+#[derive(Debug, Clone)]
+struct Cache {
+    data_cache: HashMap<usize, CacheLine>,
+    instruction_cache: HashMap<usize, CacheLine>,
+    cache_stats: CacheStats,
+}
+
+#[derive(Debug, Clone)]
+struct CacheLine {
+    data: Vec<u8>,
+    valid: bool,
+    dirty: bool,
+    last_access: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CacheStats {
+    hits: usize,
+    misses: usize,
+    evictions: usize,
+}
+
+#[derive(Debug, Clone)]
+enum Instruction {
+    Add(String, String, String), // <-- Arithmetic/Logic
+    Sub(String, String, String),
+    Mul(String, String, String),
+    Div(String, String, String),
+    And(String, String, String),
+    Or(String, String, String),
+    Xor(String, String, String),
+    Not(String, String),
+    Shl(String, String), // <-- Shifts and Rotates
+    Shr(String, String),
+    Rol(String, String),
+    Ror(String, String),
+    Jmp(usize), // <-- Control Flow
+    Jz(usize),
+    Jnz(usize),
+    Jc(usize),
+    Call(usize),
+    Ret,
+    Push(String), // <-- Stack Operations
+    Pop(String),
+    LoadMem(String, usize), // <-- Memory/IO Operations
+    StoreMem(String, usize),
+    LoadIO(String, usize),
+    StoreIO(String, usize),
+    Cmp(String, String), // <-- Special Operations
+    Set(String, String),
+    Int(u8),
+    Iret,
+    DmaTransfer(usize, usize, usize),
+}
+
 struct CPU {
-    registers: [u8; 8], // 8 general-purpose registers
-    memory: [u8; 256],  // 256-byte RAM
-    rom: [u8; 256],     // 256-byte ROM
-    stack: Vec<u8>,     // Stack for PUSH/POP operations
-    pc: usize,          // Program counter
-    zero_flag: bool,    // Zero flag
-    carry_flag: bool,   // Carry flag
-    pipeline: Vec<Instruction>, // Instruction pipeline
-    io_memory: [u8; 256], // Memory-mapped I/O
-    uart_buffer: Vec<u8>, // UART buffer for serial communication
-    gpio_state: u8,      // General Purpose I/O state
-    timer_counter: u16,  // Timer counter for system timing
+    registers: HashMap<String, u8>,
+    memory: Vec<u8>,
+    rom: Vec<u8>,
+    stack: Vec<u8>,
+    pc: usize,
+    flags: StatusFlags,
+    pipeline: VecDeque<PipelineStage>,
+    cache: Cache,
+    interrupt_vector: Vec<u16>,
+    protected_mode: bool,
+    cycle_count: u64,
+    power_consumption: f64,
+    last_instruction_time: Instant,
+    io_memory: Vec<u8>,
+    dma_controller: DMAController,
+}
+
+struct DMAController {
+    busy: bool,
+    source: usize,
+    destination: usize,
+    size: usize,
 }
 
 impl CPU {
-    /// Creates a new CPU instance.
     fn new() -> Self {
+        let mut registers = HashMap::new();
+        for i in 0..8 {
+            registers.insert(format!("R{}", i), 0);
+        }
+
         CPU {
-            registers: [0; 8],
-            memory: [0; 256],
-            rom: [0; 256],
-            stack: Vec::new(),
+            registers,
+            memory: vec![0; 65536], // 64KB memory
+            rom: vec![0; 8192],     // 8KB ROM
+            stack: Vec::with_capacity(256),
             pc: 0,
-            zero_flag: false,
-            carry_flag: false,
-            pipeline: Vec::new(),
-            io_memory: [0; 256],
-            uart_buffer: Vec::new(),
-            gpio_state: 0,
-            timer_counter: 0,
+            flags: StatusFlags {
+                zero: false,
+                carry: false,
+                overflow: false,
+                negative: false,
+                interrupt: true,
+            },
+            pipeline: VecDeque::with_capacity(5),
+            cache: Cache {
+                data_cache: HashMap::new(),
+                instruction_cache: HashMap::new(),
+                cache_stats: CacheStats {
+                    hits: 0,
+                    misses: 0,
+                    evictions: 0,
+                },
+            },
+
+            io_memory: vec![0; 256],  // 256 bytes of I/O memory
+            dma_controller: DMAController {
+                busy: false,
+                source: 0,
+                destination: 0,
+                size: 0, 
+            },
+
+            interrupt_vector: vec![0; 256],
+            protected_mode: false,
+            cycle_count: 0,
+            power_consumption: 0.0,
+            last_instruction_time: Instant::now(),
+
+            
         }
     }
 
-    /// Executes an instruction.
-    fn execute_instruction(&mut self, instr: Instruction) {
-        match instr {
-            Instruction::Mul(a, b, out) => {
-                let a_val = self.get_register(&a) as u16;
-                let b_val = self.get_register(&b) as u16;
-                let result = a_val * b_val;
-                self.set_register(&out, (result & 0xFF) as u8);
+    fn execute_instruction(&mut self, instruction: Instruction) -> Result<(), CPUError> {
+        self.cycle_count += 1;
+        let start_time = Instant::now();
+
+        let result = match instruction {
+            Instruction::Add(dest, src1, src2) => {
+                let a = self.get_register(&src1)?;
+                let b = self.get_register(&src2)?;
+                let (result, carry) = a.overflowing_add(b);
+                self.flags.carry = carry;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)?;
+                Ok(())
             }
-            Instruction::Div(a, b, out) => {
-                let a_val = self.get_register(&a) as u16;
-                let b_val = self.get_register(&b) as u16;
-                if b_val != 0 {
-                    let result = a_val / b_val;
-                    self.set_register(&out, (result & 0xFF) as u8);
+            Instruction::Mul(dest, src1, src2) => {
+                let a = self.get_register(&src1)? as u16;
+                let b = self.get_register(&src2)? as u16;
+                let result = a * b;
+                self.flags.overflow = result > 255;
+                self.set_register(&dest, (result & 0xFF) as u8)?;
+                Ok(())
+            }
+            Instruction::Div(dest, src1, src2) => {
+                let a = self.get_register(&src1)?;
+                let b = self.get_register(&src2)?;
+                if b == 0 {
+                    return Err(CPUError::DivisionByZero);
                 }
+                let result = a / b;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)?;
+                Ok(())
             }
             Instruction::LoadMem(reg, addr) => {
-                self.set_register(&reg, self.memory[addr]);
+                let value = self.read_memory(addr)?;
+                self.set_register(&reg, value)?;
+                Ok(())
             }
             Instruction::StoreMem(reg, addr) => {
-                self.memory[addr] = self.get_register(&reg);
+                let value = self.get_register(&reg)?;
+                self.write_memory(addr, value)?;
+                Ok(())
             }
+            Instruction::Jump(addr) => {
+                self.pc = addr;
+                Ok(())
+            }
+            Instruction::Call(addr) => {
+                self.push_stack(self.pc as u8)?;
+                self.pc = addr;
+                Ok(())
+            }
+            Instruction::Return => {
+                let addr = self.pop_stack()? as usize;
+                self.pc = addr;
+                Ok(())
+            }
+            Instruction::Interrupt(vector) => {
+                if !self.flags.interrupt {
+                    return Ok(());
+                }
+                self.push_stack(self.pc as u8)?;
+                self.flags.interrupt = false;
+                self.pc = self.interrupt_vector[vector as usize] as usize;
+                Ok(())
+            }
+            // Logical Operations
+            Instruction::And(dest, src1, src2) => {
+                let a = self.get_register(&src1)?;
+                let b = self.get_register(&src2)?;
+                let result = a & b;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)
+            }
+            Instruction::Or(dest, src1, src2) => {
+                let a = self.get_register(&src1)?;
+                let b = self.get_register(&src2)?;
+                let result = a | b;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)
+            }
+            Instruction::Xor(dest, src1, src2) => {
+                let a = self.get_register(&src1)?;
+                let b = self.get_register(&src2)?;
+                let result = a ^ b;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)
+            }
+            Instruction::Not(dest, src) => {
+                let value = self.get_register(&src)?;
+                let result = !value;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)
+            }
+
+            // Shift and Rotate Operations
+            Instruction::Shl(dest, src) => {
+                let value = self.get_register(&src)?;
+                self.flags.carry = (value & 0x80) != 0;
+                let result = value << 1;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)
+            }
+            Instruction::Shr(dest, src) => {
+                let value = self.get_register(&src)?;
+                self.flags.carry = (value & 0x01) != 0;
+                let result = value >> 1;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)
+            }
+            Instruction::Rol(dest, src) => {
+                let value = self.get_register(&src)?;
+                let carry = (value & 0x80) != 0;
+                let result = (value << 1) | (if carry { 1 } else { 0 });
+                self.flags.carry = carry;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)
+            }
+            Instruction::Ror(dest, src) => {
+                let value = self.get_register(&src)?;
+                let carry = (value & 0x01) != 0;
+                let result = (value >> 1) | (if carry { 0x80 } else { 0 });
+                self.flags.carry = carry;
+                self.flags.zero = result == 0;
+                self.set_register(&dest, result)
+            }
+
+            // Jump Operations
+            Instruction::Jmp(addr) => {
+                self.pc = addr;
+                Ok(())
+            }
+            Instruction::Jz(addr) => {
+                if self.flags.zero {
+                    self.pc = addr;
+                }
+                Ok(())
+            }
+            Instruction::Jnz(addr) => {
+                if !self.flags.zero {
+                    self.pc = addr;
+                }
+                Ok(())
+            }
+            Instruction::Jc(addr) => {
+                if self.flags.carry {
+                    self.pc = addr;
+                }
+                Ok(())
+            }
+
+            // Compare and Set
+            Instruction::Cmp(reg1, reg2) => {
+                let a = self.get_register(&reg1)?;
+                let b = self.get_register(&reg2)?;
+                self.flags.zero = a == b;
+                self.flags.carry = a < b;
+                Ok(())
+            }
+            Instruction::Set(dest, src) => {
+                let value = self.get_register(&src)?;
+                self.set_register(&dest, value)
+            }
+
+            // I/O Operations
             Instruction::LoadIO(reg, addr) => {
-                self.set_register(&reg, self.io_memory[addr]);
+                if addr >= self.io_memory.len() {
+                    return Err(CPUError::MemoryAccessViolation(addr));
+                }
+                let value = self.io_memory[addr];
+                self.set_register(&reg, value)
             }
             Instruction::StoreIO(reg, addr) => {
-                self.io_memory[addr] = self.get_register(&reg);
-            }
-            Instruction::DmaTransfer(src, dest, size) => {
-                for i in 0..size {
-                    self.memory[dest + i] = self.memory[src + i];
+                if addr >= self.io_memory.len() {
+                    return Err(CPUError::MemoryAccessViolation(addr));
                 }
+                let value = self.get_register(&reg)?;
+                self.io_memory[addr] = value;
+                Ok(())
             }
-            _ => {}
+            // Add more instruction implementations...
+            _ => Ok(()),
+        };
+
+        // Update performance metrics
+        let duration = start_time.elapsed();
+        self.update_power_consumption(duration);
+        self.last_instruction_time = Instant::now();
+
+        result
+    }
+
+    fn read_memory(&mut self, addr: usize) -> Result<u8, CPUError> {
+        // Check cache first
+        if let Some(cache_line) = self.cache.data_cache.get(&(addr / 16)) {
+            if cache_line.valid {
+                self.cache.cache_stats.hits += 1;
+                return Ok(cache_line.data[addr % 16]);
+            }
+        }
+
+        self.cache.cache_stats.misses += 1;
+        
+        // Cache miss - read from memory
+        if addr >= self.memory.len() {
+            return Err(CPUError::MemoryAccessViolation(addr));
+        }
+        
+        // Load into cache
+        self.update_cache(addr, self.memory[addr]);
+        
+        Ok(self.memory[addr])
+    }
+
+    fn write_memory(&mut self, addr: usize, value: u8) -> Result<(), CPUError> {
+        if addr >= self.memory.len() {
+            return Err(CPUError::MemoryAccessViolation(addr));
+        }
+
+        // Update cache if present
+        if let Some(cache_line) = self.cache.data_cache.get_mut(&(addr / 16)) {
+            if cache_line.valid {
+                cache_line.data[addr % 16] = value;
+                cache_line.dirty = true;
+                self.cache.cache_stats.hits += 1;
+            }
+        }
+
+        self.memory[addr] = value;
+        Ok(())
+    }
+
+    fn update_cache(&mut self, addr: usize, value: u8) {
+        let cache_line = CacheLine {
+            data: vec![0; 16],
+            valid: true,
+            dirty: false,
+            last_access: Instant::now(),
+        };
+
+        // Simple LRU implementation
+        if self.cache.data_cache.len() >= 256 {
+            if let Some((oldest_addr, _)) = self.cache.data_cache
+                .iter()
+                .min_by_key(|(_, line)| line.last_access) {
+                let oldest_addr = *oldest_addr;
+                self.cache.data_cache.remove(&oldest_addr);
+                self.cache.cache_stats.evictions += 1;
+            }
+        }
+
+        self.cache.data_cache.insert(addr / 16, cache_line);
+    }
+
+    fn update_power_consumption(&mut self, duration: Duration) {
+        // Simple power consumption model
+        let instruction_power = 0.1; // Base power per instruction
+        let memory_power = 0.05; // Additional power for memory access
+        let cache_power = 0.02; // Additional power for cache access
+
+        let total_power = instruction_power
+            + (self.cache.cache_stats.hits as f64 * cache_power)
+            + (self.cache.cache_stats.misses as f64 * memory_power);
+
+        self.power_consumption += total_power * duration.as_secs_f64();
+    }
+
+    fn push_stack(&mut self, value: u8) -> Result<(), CPUError> {
+        if self.stack.len() >= 256 {
+            return Err(CPUError::StackOverflow);
+        }
+        self.stack.push(value);
+        Ok(())
+    }
+
+    fn pop_stack(&mut self) -> Result<u8, CPUError> {
+        self.stack.pop().ok_or(CPUError::StackOverflow)
+    }
+
+    fn get_register(&self, reg: &str) -> Result<u8, CPUError> {
+        self.registers
+            .get(reg)
+            .copied()
+            .ok_or(CPUError::InvalidInstruction(0))
+    }
+
+    fn set_register(&mut self, reg: &str, value: u8) -> Result<(), CPUError> {
+        if let Some(r) = self.registers.get_mut(reg) {
+            *r = value;
+            Ok(())
+        } else {
+            Err(CPUError::InvalidInstruction(0))
         }
     }
 }
 
-/// Defines the instruction set encoding for the 8-bit CPU.
-pub struct Assembler {
+// Assembler implementation
+struct Assembler {
+    labels: HashMap<String, usize>,
     instructions: HashMap<String, u8>,
 }
 
 impl Assembler {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let mut instructions = HashMap::new();
-        instructions.insert("AND", 0x00);
-        instructions.insert("OR", 0x01);
-        instructions.insert("XOR", 0x02);
-        instructions.insert("NOT", 0x03);
-        instructions.insert("SHL", 0x04);
-        instructions.insert("SHR", 0x05);
-        instructions.insert("ROL", 0x06);
-        instructions.insert("ROR", 0x07);
-        instructions.insert("JMP", 0x08);
-        instructions.insert("JZ", 0x09);
-        instructions.insert("JNZ", 0x0A);
-        instructions.insert("JC", 0x0B);
-        instructions.insert("CMP", 0x0C);
-        instructions.insert("SET", 0x0D);
-        instructions.insert("PUSH", 0x0E);
-        instructions.insert("POP", 0x0F);
-        instructions.insert("CALL", 0x10);
-        instructions.insert("RET", 0x11);
-        instructions.insert("MUL", 0x12);
-        instructions.insert("DIV", 0x13);
-        instructions.insert("INT", 0x14);
-        instructions.insert("IRET", 0x15);
-        instructions.insert("LOADM", 0x16);
-        instructions.insert("STOREM", 0x17);
-        instructions.insert("LOADIO", 0x18);
-        instructions.insert("STOREIO", 0x19);
-        instructions.insert("DMAT", 0x1A);
+        instructions.insert("AND".to_string(), 0x01);
+        instructions.insert("OR".to_string(), 0x02);
+        instructions.insert("XOR".to_string(), 0x03);
+        instructions.insert("NOT".to_string(), 0x04);
+        instructions.insert("SHL".to_string(), 0x05);
+        instructions.insert("SHR".to_string(), 0x06);
+        instructions.insert("ROL".to_string(), 0x07);
+        instructions.insert("ROR".to_string(), 0x08);
+        instructions.insert("JMP".to_string(), 0x09);
+        instructions.insert("JZ".to_string(), 0x0A);
+        instructions.insert("JNZ".to_string(), 0x0B);
+        instructions.insert("JC".to_string(), 0x0C);
+        instructions.insert("CMP".to_string(), 0x0D);
+        instructions.insert("SET".to_string(), 0x0E);
+        instructions.insert("PUSH".to_string(), 0x0F);
+        instructions.insert("POP".to_string(), 0x10);
+        instructions.insert("CALL".to_string(), 0x11);
+        instructions.insert("RET".to_string(), 0x12);
+        instructions.insert("MUL".to_string(), 0x13);
+        instructions.insert("DIV".to_string(), 0x14);
+        instructions.insert("INT".to_string(), 0x15);
+        instructions.insert("IRET".to_string(), 0x16);
+        instructions.insert("LOADM".to_string(), 0x17);
+        instructions.insert("STOREM".to_string(), 0x18);
+        instructions.insert("LOADIO".to_string(), 0x19);
+        instructions.insert("STOREIO".to_string(), 0x1A);
+        instructions.insert("DMA".to_string(), 0x1B);
 
-        Self { instructions }
+        Assembler {
+            labels: HashMap::new(),
+            instructions,
+        }
     }
 
-    /// Assembles an assembly source file into machine code.
-    pub fn assemble(&self, input: &str, output: &str) -> io::Result<()> {
-        let mut file = File::open(input)?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
+    fn assemble(&mut self, source: &str) -> Result<Vec<u8>, String> {
+        let mut binary = Vec::new();
+        let mut current_address = 0;
 
-        let mut machine_code: Vec<u8> = Vec::new();
-        
-        for line in contents.lines() {
+        // First pass: collect labels
+        for line in source.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+
+            if line.ends_with(':') {
+                let label = line[..line.len() - 1].to_string();
+                self.labels.insert(label, current_address);
+            } else {
+                current_address += self.instruction_size(line);
+            }
+        }
+
+        // Second pass: generate binary
+        for line in source.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(';') || line.ends_with(':') {
+                continue;
+            }
+
             let tokens: Vec<&str> = line.split_whitespace().collect();
-            if tokens.is_empty() { continue; }
-            
             if let Some(&opcode) = self.instructions.get(tokens[0]) {
-                machine_code.push(opcode);
-                for &token in &tokens[1..] {
+                binary.push(opcode);
+                
+                // Process operands
+                for token in &tokens[1..] {
                     if let Ok(value) = token.parse::<u8>() {
-                        machine_code.push(value);
+                        binary.push(value);
+                    } else if let Some(&addr) = self.labels.get(*token) {
+                        binary.push(addr as u8);
+                    } else {
+                        return Err(format!("Invalid operand: {}", token));
                     }
                 }
             }
         }
 
-        let mut out_file = File::create(output)?;
-        out_file.write_all(&machine_code)?;
+        Ok(binary)
+    }
+
+    fn instruction_size(&self, instruction: &str) -> usize {
+        let tokens: Vec<&str> = instruction.split_whitespace().collect();
+        if tokens.is_empty() {
+            return 0;
+        }
+        
+        // Basic size calculation - 1 byte for opcode + 1 byte per operand
+        1 + tokens.len() - 1
+    }
+}
+
+// Debugger implementation
+struct Debugger {
+    breakpoints: HashMap<usize, bool>,
+    cpu: CPU,
+}
+
+impl Debugger {
+    fn new(cpu: CPU) -> Self {
+        Debugger {
+            breakpoints: HashMap::new(),
+            cpu,
+        }
+    }
+
+    fn set_breakpoint(&mut self, address: usize) {
+        self.breakpoints.insert(address, true);
+    }
+
+    fn clear_breakpoint(&mut self, address: usize) {
+        self.breakpoints.remove(&address);
+    }
+
+    fn step(&mut self) -> Result<(), CPUError> {
+        // Execute one instruction
+        if let Some(instruction) = self.cpu.pipeline.pop_front() {
+            match instruction {
+                PipelineStage::Execute(result) => {
+                    self.cpu.execute_instruction(result.into())?;
+                }
+                _ => {}
+            }
+        }
         Ok(())
     }
-}
 
-/// Loads machine code from a binary file into memory.
-pub struct BinaryLoader;
-
-impl BinaryLoader {
-    pub fn load(filename: &str) -> io::Result<Vec<u8>> {
-        let mut file = File::open(filename)?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-        Ok(buffer)
-    }
-}
-
-/// Represents the CPU with registers and memory.
-pub struct CPU {
-    registers: [u8; 8],
-    memory: [u8; 256],
-    pc: usize,
-}
-
-impl CPU {
-    pub fn new() -> Self {
-        CPU {
-            registers: [0; 8],
-            memory: [0; 256],
-            pc: 0,
-        }
-    }
-
-    /// Loads a program into memory.
-    pub fn load_program(&mut self, program: Vec<u8>) {
-        self.memory[..program.len()].copy_from_slice(&program);
-    }
-
-    /// Executes the loaded program.
-    pub fn execute(&mut self) {
-        while self.pc < self.memory.len() {
-            let opcode = self.memory[self.pc];
-            self.pc += 1;
-            match opcode {
-                0x00 => println!("Executing AND instruction"),
-                0x01 => println!("Executing OR instruction"),
-                0x02 => println!("Executing XOR instruction"),
-                0x08 => println!("Executing JMP instruction"),
-                _ => println!("Unknown instruction: {:#04X}", opcode),
-            }
-        }
-    }
-}
-
-///fn main() {
-///    let assembler = Assembler::new();
-///    if let Err(e) = assembler.assemble("program.asm", "program.bin") {
-///        eprintln!("Error: {}", e);
-///    } else {
-///        println!("Assembly successful!");
-///    }
-///
-///    match BinaryLoader::load("program.bin") {
-///        Ok(data) => {
-///            println!("Loaded binary: {:?}", data);
-///            let mut cpu = CPU::new();
-///            cpu.load_program(data);
-///            cpu.execute();
-///        }
-///        Err(e) => eprintln!("Failed to load binary: {}", e),
-///    }
-///}
-
-
-/// CPU Simulator for debugging and cycle-accurate execution.
-pub struct Simulator {
-    cpu: CPU,
-    breakpoints: Vec<usize>,
-}
-
-impl Simulator {
-    pub fn new() -> Self {
-        Simulator {
-            cpu: CPU::new(),
-            breakpoints: Vec::new(),
-        }
-    }
-
-    pub fn load_program(&mut self, program: Vec<u8>) {
-        self.cpu.load_program(program);
-    }
-
-    pub fn set_breakpoint(&mut self, address: usize) {
-        self.breakpoints.push(address);
-    }
-
-    pub fn step(&mut self) {
-        let opcode = self.cpu.memory[self.cpu.pc];
-        println!("Executing instruction at PC: {:#04X}, Opcode: {:#04X}", self.cpu.pc, opcode);
-        self.cpu.execute();
-    }
-
-    pub fn run(&mut self) {
+    fn run(&mut self) -> Result<(), CPUError> {
         while self.cpu.pc < self.cpu.memory.len() {
-            if self.breakpoints.contains(&self.cpu.pc) {
-                println!("Hit breakpoint at {:#04X}", self.cpu.pc);
-                break;
+            if self.breakpoints.contains_key(&self.cpu.pc) {
+                println!("Breakpoint hit at {:#04x}", self.cpu.pc);
+                return Ok(());
             }
-            self.step();
+            self.step()?;
         }
+        Ok(())
     }
-}
 
-/// Verilog Generator for FPGA compatibility.
-pub struct VerilogGenerator;
-
-impl VerilogGenerator {
-    pub fn generate() -> String {
-        let verilog_code = """
-        module cpu (
-            input clk,
-            input reset,
-            output reg [7:0] registers [7:0],
-            output reg [7:0] memory [255:0]
-        );
-            reg [7:0] pc;
-            initial begin
-                pc = 0;
-            end
-
-            always @(posedge clk or posedge reset) begin
-                if (reset)
-                    pc <= 0;
-                else begin
-                    case (memory[pc])
-                        8'h00: registers[0] <= registers[0] & registers[1]; // AND operation
-                        8'h01: registers[0] <= registers[0] | registers[1]; // OR operation
-                        8'h02: registers[0] <= registers[0] ^ registers[1]; // XOR operation
-                        default: pc <= pc + 1;
-                    endcase
-                end
-            end
-        endmodule
-        """.to_string();
-        
-        verilog_code
-    }
-}
-
-///fn main() {
-///    let verilog_output = VerilogGenerator::generate();
-///    println!("Generated Verilog:\n{}", verilog_output);
-///}
-
-fn main() {
-    let mut cpu = CPU::new();
-    cpu.pipeline.push(Instruction::Mul("R1".to_string(), "R2".to_string(), "R3".to_string()));
-    cpu.pipeline.push(Instruction::LoadMem("R4".to_string(), 10));
-    cpu.pipeline_execute();
-}
+    fn print_state(&self) {
+        println!("CPU State:");
+        println!("PC: {:#04x}", self.cpu.pc);
+        println!("Flags: {:?}", self.cpu.flags);
+        println!("Registers:");
+        for (reg, value) in &self.cpu.registers {
+            println!("{}: {:#04x}", reg, value);
