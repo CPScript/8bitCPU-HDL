@@ -1,10 +1,118 @@
 /// KernelOS.rs
 /// Missing logic
 
+#![no_std]
+#![no_main]
+#![feature(abi_x86_interrupt)]
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use core::panic::PanicInfo;
+use x86_64::structures::idt::InterruptDescriptorTable;
+use spin::Mutex;
+use bootloader::{entry_point, BootInfo};
+
+mod cpu;
+mod memory;
+mod process;
+mod fs;
+mod device;
+mod net;
+mod sync;
+
+// Global kernel state
+pub static KERNEL: Mutex<KernelOS> = Mutex::new(KernelOS::new())
+
+entry_point!(kernel_main);
+
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
+    // Initialize essential hardware
+    init_hardware();
+    
+    // Set up memory management
+    let mut kernel = KERNEL.lock();
+    kernel.memory_manager.init_from_boot_info(boot_info);
+    
+    // Initialize kernel subsystems
+    kernel.init_interrupt_handlers().expect("Failed to initialize interrupts");
+    kernel.init_device_manager().expect("Failed to initialize device manager");
+    kernel.init_file_system().expect("Failed to initialize filesystem");
+    
+    // Start scheduler
+    kernel.scheduler.start();
+    
+    // Create init process
+    let init_program = include_bytes!("../../userspace/init/init.bin");
+    let init_pid = kernel.create_process(init_program.to_vec())
+        .expect("Failed to create init process");
+    
+    println!("KernelOS initialized successfully!");
+    
+    // Enter the scheduler loop
+    loop {
+        kernel.schedule().expect("Scheduler failed");
+        x86_64::instructions::hlt();
+    }
+}
+
+fn init_hardware() {
+    // Disable interrupts during initialization
+    x86_64::instructions::interrupts::disable();
+    
+    // Initialize GDT
+    gdt::init();
+    
+    // Initialize IDT
+    idt::init();
+    
+    // Initialize PIC
+    unsafe {
+        pic8259::ChainedPics::new(0x20, 0x28).initialize();
+    }
+    
+    // Initialize basic devices
+    device::keyboard::init();
+    device::serial::init();
+    
+    // Enable interrupts
+    x86_64::instructions::interrupts::enable();
+}
+
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    println!("KERNEL PANIC: {}", info);
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+// Interrupt handlers
+mod interrupts {
+    use x86_64::structures::idt::InterruptStackFrame;
+    
+    pub extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+        println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
+    }
+    
+    pub extern "x86-interrupt" fn page_fault_handler(
+        stack_frame: InterruptStackFrame,
+        error_code: u64
+    ) {
+        use x86_64::registers::control::Cr2;
+        println!("EXCEPTION: PAGE FAULT");
+        println!("Accessed Address: {:?}", Cr2::read());
+        println!("Error Code: {:?}", error_code);
+        println!("{:#?}", stack_frame);
+    }
+    
+    pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+        unsafe {
+            pic8259::ChainedPics::new(0x20, 0x28).notify_end_of_interrupt(0x20);
+        }
+    }
+}
 
 // Core Structures
 struct KernelOS {
