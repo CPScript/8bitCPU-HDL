@@ -1,0 +1,30 @@
+[package]
+name = "kernel-os"
+version = "0.1.0"
+edition = "2021"
+authors = ["CPScript"]
+
+[workspace]
+members = [
+    "kernel",
+    "userspace/init",
+    "userspace/shell"
+]
+
+[dependencies]
+bitflags = "2.4.1"
+spin = "0.9.8"
+x86_64 = "0.14.11"
+volatile = "0.4.6"
+uart_16550 = "0.3.0"
+pic8259 = "0.10.4"
+pc-keyboard = "0.7.0"
+linked_list_allocator = "0.10.5"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
